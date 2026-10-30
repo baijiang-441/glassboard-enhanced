@@ -1,0 +1,41 @@
+﻿<Project Sdk="Microsoft.NET.Sdk.WindowsDesktop">
+  <PropertyGroup>
+    <AssemblyName>GlassBoard</AssemblyName>
+    <GenerateAssemblyInfo>False</GenerateAssemblyInfo>
+    <OutputType>WinExe</OutputType>
+    <UseWPF>True</UseWPF>
+    <TargetFramework>net48</TargetFramework><UseWindowsForms>true</UseWindowsForms>
+  </PropertyGroup>
+  <PropertyGroup>
+    <LangVersion>11.0</LangVersion>
+    <AllowUnsafeBlocks>True</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <PropertyGroup>
+    <ApplicationIcon>app.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <RootNamespace />
+  </PropertyGroup>
+  <ItemGroup>
+    <None Remove="GlassBoard.MediaBridge.ps1" />
+    <None Remove="GlassBoard.NativeMediaBridge.ps1" />
+    <None Remove="GlassBoard.SystemControl.ps1" />
+    <EmbeddedResource Include="GlassBoard.MediaBridge.ps1" LogicalName="GlassBoard.MediaBridge.ps1" />
+    <EmbeddedResource Include="GlassBoard.NativeMediaBridge.ps1" LogicalName="GlassBoard.NativeMediaBridge.ps1" />
+    <EmbeddedResource Include="GlassBoard.SystemControl.ps1" LogicalName="GlassBoard.SystemControl.ps1" />
+  </ItemGroup>
+  <ItemGroup>
+    <Reference Include="Interop.UIAutomationClient">
+      <HintPath>..\portable\Interop.UIAutomationClient.dll</HintPath>
+    </Reference>
+    <Reference Include="WindowsBase" />
+    <Reference Include="System.Core" />
+    <Reference Include="PresentationCore" />
+    <Reference Include="System.Runtime.Serialization" />
+    <Reference Include="System.Xml" />
+    <Reference Include="System.IO.Compression" />
+    <Reference Include="System.Management" />
+    <Reference Include="System.Xml.Linq" />
+    <Reference Include="UIAutomationClient" />
+    <Reference Include="UIAutomationTypes" />
+  </ItemGroup>
+</Project>

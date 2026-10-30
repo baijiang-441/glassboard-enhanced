@@ -1,0 +1,12 @@
+**/bin/
+**/obj/
+.vs/
+artifacts/
+*.user
+*.suo
+*.log
+fixture-*/
+layout*.json
+*layout*.json
+removed*.json
+*.gbbackup
