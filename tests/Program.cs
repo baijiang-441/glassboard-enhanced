@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.IO;
 using System.Linq;
 using System.Collections.Generic;
@@ -6,6 +6,7 @@ using System.Reflection;
 using System.Runtime.Serialization.Json;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Interop;
 using System.Windows.Controls;
 using System.Windows.Threading;
 using System.Windows.Input;
@@ -15,14 +16,23 @@ class Program
 {
  [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool PostMessage(IntPtr window,int message,IntPtr w,IntPtr l);
  [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool IsWindowEnabled(IntPtr window);
+ [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr window);
+ [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool IsIconic(IntPtr window);
  // Shell extensions can retain native teardown threads. Exit only this isolated test process after all checks and application cleanup.
  [System.Runtime.InteropServices.DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
  [System.Runtime.InteropServices.DllImport("kernel32.dll")] static extern bool TerminateProcess(IntPtr process,uint code);
+ [System.Runtime.InteropServices.DllImport("user32.dll")]static extern IntPtr GetForegroundWindow();
+ [System.Runtime.InteropServices.DllImport("user32.dll")]static extern bool SetWindowPos(IntPtr h,IntPtr after,int x,int y,int w,int height,uint flags);
  static int checks;
  static void Check(bool ok, string message) { if (!ok) throw new Exception(message); checks++; }
- static string root = Path.Combine(Path.GetTempPath(), "GlassBoard-tests", "fixture-" + Guid.NewGuid().ToString("N"));
- [STAThread] static int Main()
+ static string root = Path.Combine(Path.GetTempPath(),"GlassBoard-tests", "fixture-" + Guid.NewGuid().ToString("N"));
+ [STAThread] static int Main(string[] args)
  {
+  if(args.Length>0 && args[0]=="--process-fixture") {
+   if(args.Length>1 && args[1]=="window") new Application().Run(new Window {Title="GlassBoard isolated process fixture",Width=120,Height=80,ShowInTaskbar=true});
+   else System.Threading.Thread.Sleep(60000);
+   return 0;
+  }
   int exit = 1;
   var app = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
   app.Dispatcher.InvokeAsync(async () => {
@@ -32,9 +42,47 @@ class Program
   });
   app.Run(); return exit;
  }
+
+ static async Task TestDockPresentation() {
+foreach(int count in new[]{0,1,2,10,40}){var p=DockStripPanel.Positions(count,64,400,-1);Check(p.Length==count,"positions count "+count);Check(p.Zip(p.Skip(1),(a,b)=>a<=b).All(x=>x),"ordered overlap "+count);if(count>0)Check(p.Last()+64<=400,"fits budget "+count);}
+var focused=DockStripPanel.Positions(12,64,400,5);Check(focused[6]-focused[5]>=64,"hovered slot exposed on right");Check(focused[5]-focused[4]>=64,"hovered slot exposed on left");
+var strip=new DockStripPanel{Budget=360,AnimateMoves=false,Orientation=Orientation.Horizontal};
+for(int i=0;i<8;i++){var button=new Button{Width=60,Height=60};DockStripPanel.SetIsApplication(button,i>1 && i<6);strip.Children.Add(button);}
+strip.Measure(new Size(double.PositiveInfinity,70));strip.Arrange(new Rect(0,0,360,70));
+var xs=strip.Children.Cast<Button>().Select(b=>b.TranslatePoint(new Point(0,0),strip).X).ToArray();var gaps=xs.Zip(xs.Skip(1),(a,b)=>b-a).ToArray();Check(gaps.Max()-gaps.Min()<.01,"system and application centers share one spacing");
+Check(DockPreviewWindow.CleanTitle("网页标题 - 内存使用率 - 147 MB")=="网页标题","preview hides browser diagnostics");
+var opt=new DockOptions();opt.Length=3000;opt.Normalize();Check(opt.Length==2000,"length clamped");
+var tabs=new TabControl();tabs.Items.Add(new TabItem{Header="First test page",Content="one"});tabs.Items.Add(new TabItem{Header="Second test page",Content="two"});
+var owner=new Window{Title="Preview isolated fixture",Width=400,Height=300,Content=tabs};owner.Show();await Task.Delay(200);var h=new WindowInteropHelper(owner).Handle;
+var pages=await ApplicationPageChoices.ReadAsync(new[]{new RunningWindow{Handle=h,Title=owner.Title,Path="generic-editor.exe"}});Check(pages.Count==2,"generic non-browser tabs read");
+await Task.Run(()=>pages[1].Select());await Task.Delay(200);Check(tabs.SelectedIndex==1,"specific page selection");
+owner.WindowState=WindowState.Minimized;await Task.Delay(200);var cached=await ApplicationPageChoices.ReadAsync(new[]{new RunningWindow{Handle=h,Title=owner.Title,Path="generic-editor.exe"}});Check(cached.Count==2 && IsIconic(h),"minimized generic tabs retained without restore");var before=GetForegroundWindow();var preview=new DockPreviewWindow(owner);preview.Show();preview.UpdateLayout();preview.Preview(h);await Task.Delay(150);Check(preview.HasThumbnail,"DWM thumbnail registered");Check(preview.ActualHeight<230,"single window preview stays compact");Check(IsIconic(h),"hover preview leaves source minimized");Check(GetForegroundWindow()==before,"preview does not steal foreground");preview.Close();Check(!preview.HasThumbnail,"thumbnail released");owner.Close();
+ }
  static async Task Run()
  {
   Directory.CreateDirectory(root);
+  await TestEndApplication();
+  await TestDockPresentation();
+  var screen = new Rect(0,0,1920,1080);
+  Check(AutoHidePolicy.AtRevealEdge(new Point(960,1079),screen,500,920,12),"center bottom reveals Dock");
+  Check(!AutoHidePolicy.AtRevealEdge(new Point(1910,1079),screen,500,920,12),"system tray corner does not reveal Dock");
+  Check(!AutoHidePolicy.AtRevealEdge(new Point(10,1079),screen,500,920,12),"left bottom does not reveal Dock");
+  Check(!AutoHidePolicy.AtRevealEdge(new Point(960,1040),screen,500,920,12),"above edge does not reveal Dock");
+  Check(AutoHidePolicy.AtRevealEdge(new Point(-960,1079),new Rect(-1920,0,1920,1080),-1400,920,12),"negative monitor coordinates reveal within Dock span");
+  var concurrentCache=new BoundedCache<int,int>(32);
+  await Task.WhenAll(Enumerable.Range(0,4).Select(worker=>Task.Run(()=>{for(int i=0;i<1000;i++){concurrentCache.Put(i,i);concurrentCache.TryGet(i,out var read);}})));
+  Check(concurrentCache.Count<=32,"background and UI cache access remains bounded");
+  string iconFile=Path.Combine(root,"async-icon.txt");File.WriteAllText(iconFile,"test");
+  var asyncIcon=await BoardIconLoader.ReadAsync(new Entry{Path=iconFile,Name="async icon"},false,false);
+  Check(asyncIcon!=null && asyncIcon.IsFrozen,"background Shell icon extraction returns frozen cross-thread image");
+  var hideTest = new AutoHidePolicy(); var nowTest = DateTime.UtcNow;
+  Check(!hideTest.Update(nowTest,true,true,false,false,250),"Dock remains visible under pointer");
+  Check(!hideTest.Update(nowTest.AddMilliseconds(200),true,false,false,false,250),"Dock leave grace period");
+  Check(hideTest.Update(nowTest.AddMilliseconds(260),true,false,false,false,250),"Dock hides promptly after leave");
+  Check(!hideTest.Update(nowTest.AddMilliseconds(300),true,false,true,false,250),"bottom edge reveals Dock");
+  Check(!hideTest.Update(nowTest.AddMilliseconds(700),true,false,false,true,250),"menu or drag protects Dock");
+  Check(!hideTest.Update(nowTest.AddMilliseconds(750),true,false,false,false,250),"menu closure starts grace period");
+  Check(hideTest.Update(nowTest.AddMilliseconds(960),true,false,false,false,250),"Dock hides after protected interaction ends");
   typeof(Store).GetField("Folder").SetValue(null, Path.Combine(root,"app-config"));
   typeof(Store).GetField("FileName").SetValue(null, Path.Combine(root,"app-config","layout.json"));
   string before = Path.Combine(root, "原文件夹");
@@ -78,6 +126,13 @@ class Program
   renamed.Apps[1].IconPath=""; renamed.Hotkeys.ForEach(h=>h.Enabled=false); renamed.BoardHideSearch=true; c.Prefs=renamed;
   Check(c.Menu(renamed.Apps[0]).Items.OfType<MenuItem>().Any(m=>(string)m.Header=="重命名文件夹（同步磁盘）"),"real-folder menu");
   Check(!c.Menu(renamed.Apps[1]).Items.OfType<MenuItem>().Any(m=>(string)m.Header=="重命名文件夹（同步磁盘）"),"file excluded");
+  var beforePreviewForeground=GetForegroundWindow();
+  typeof(BoardWindow).GetMethod("OpenHoverPreview",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(c.Board,null);
+  Check(c.Board.IsVisible && c.Board.IsHoverPreview,"hover panel opens temporarily");
+  Check(GetForegroundWindow()==beforePreviewForeground,"hover panel preserves foreground");
+  typeof(BoardWindow).GetMethod("PinHoverPreview",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(c.Board,null);
+  Check(c.Board.IsVisible && !c.Board.IsHoverPreview,"click promotes preview to pinned panel");
+  c.Board.Hide();
   c.Board.Open(); c.Board.SyncGroups(); c.Board.Render();
   var bar=(WrapPanel)typeof(BoardWindow).GetField("folderBar",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(c.Board);
   Check(bar.Children.OfType<Border>().Any(b=>(string)b.Tag=="工作" && b.ContextMenu.Items.OfType<MenuItem>().Any(m=>(string)m.Header=="重命名分组")),"group context menu");
@@ -353,6 +408,7 @@ class Program
   groupType.GetField("Windows").SetValue(testGroup,new List<RunningWindow>{closeTarget});
   var taskMenu=(ContextMenu)typeof(DockWindow).GetMethod("TaskWindowMenu",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(c.Dock,new[]{testGroup});
   Check(taskMenu.Items.OfType<MenuItem>().Any(i=>(string)i.Header=="关闭窗口"),"running icon menu offers close");
+  Check(taskMenu.Items.OfType<MenuItem>().Any(i=>(string)i.Header=="结束后台进程…"),"running icon menu offers end background process");
   Check(taskMenu.Items.OfType<MenuItem>().Any(i=>(string)i.Header=="任务管理器"),"running icon menu offers task manager");
   Check(c.Dock.ContextMenu.Items.OfType<MenuItem>().Any(i=>(string)i.Header=="任务管理器"),"Dock background menu offers task manager");
   c.Dock.Show(); taskMenu.PlacementTarget=c.Dock;taskMenu.Opened+=(s,e)=>Console.WriteLine("Task menu opened"); taskMenu.IsOpen=true;
@@ -387,6 +443,48 @@ class Program
   };
   timer.Start();
  }
+ static async Task TestEndApplication() {
+  string source=Assembly.GetExecutingAssembly().Location;
+  string a=Path.Combine(root,"process-a"),b=Path.Combine(root,"process-b");
+  foreach(string d in new[]{a,b}) {Directory.CreateDirectory(d);File.Copy(source,Path.Combine(d,"ProcessFixture.exe"));File.Copy(typeof(ApplicationTasks).Assembly.Location,Path.Combine(d,"GlassBoard.exe"));}
+  var processes=new List<System.Diagnostics.Process>();
+  try {
+   foreach(var spec in new[]{new[]{a,"window"},new[]{a,"background"},new[]{b,"background"}})
+    processes.Add(System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(Path.Combine(spec[0],"ProcessFixture.exe"),"--process-fixture "+spec[1]){UseShellExecute=false,CreateNoWindow=true}));
+   var front=processes[0];IntPtr handle=IntPtr.Zero;
+   for(int i=0;i<60 && handle==IntPtr.Zero;i++){await Task.Delay(100);front.Refresh();handle=front.MainWindowHandle;}
+   Check(handle!=IntPtr.Zero,"isolated application window started");
+   SetForegroundWindow(handle);await Task.Delay(200);
+   var layerDock=new Window {Title="Dock layer fixture",Left=10,Top=10,Width=220,Height=90,Topmost=true,ShowActivated=false,ShowInTaskbar=false};
+   layerDock.Show();await Task.Delay(100);
+   SetWindowPos(handle,new IntPtr(-1),10,10,220,90,0x10);await Task.Delay(150);
+   var foregroundBeforeRepair=GetForegroundWindow();
+   Check(DesktopWindowPolicy.RestoreIfCovered(layerDock,70,50),"covered Dock repairs actual external z-order");
+   await Task.Delay(150);
+   Check(!DesktopWindowPolicy.RestoreIfCovered(layerDock,70,50),"uncovered Dock avoids repeated z-order changes");
+   Check(GetForegroundWindow()==foregroundBeforeRepair,"Dock repair does not activate itself");
+   layerDock.Close();SetWindowPos(handle,new IntPtr(-2),0,0,0,0,0x13);
+   Check(!RunningWindows.MinimizeForeground(new[]{IntPtr.Zero}),"invalid window cannot be minimized");
+   Check(RunningWindows.MinimizeForeground(new[]{handle}),"foreground application click minimizes");
+   await Task.Delay(200);Check(IsIconic(handle),"foreground application becomes minimized");
+   Check(!RunningWindows.MinimizeForeground(new[]{handle}),"minimized application is not minimized again");
+   Check(RunningWindows.ActivateHandle(handle),"minimized application restores");
+   await Task.Delay(200);Check(!IsIconic(handle),"application restored after second click");
+   var simulatedDock=new Window {Title="Dock focus regression fixture",Width=120,Height=80};
+   simulatedDock.Show();await Task.Delay(200);SetForegroundWindow(new System.Windows.Interop.WindowInteropHelper(simulatedDock).Handle);await Task.Delay(150);
+   Check(RunningWindows.ExternalForeground()==IntPtr.Zero,"own Dock focus is excluded from external foreground tracking");
+   Check(RunningWindows.MinimizeForeground(new[]{handle},handle),"cached pre-click foreground survives Dock activation");
+   await Task.Delay(200);Check(IsIconic(handle),"application minimizes after Dock captured focus");
+   simulatedDock.Close();RunningWindows.ActivateHandle(handle);await Task.Delay(150);
+   var target=new RunningWindow{Handle=handle,ProcessId=(uint)front.Id,Path=Path.Combine(a,"ProcessFixture.exe")};
+   Check(ApplicationTasks.EndApplication(new[]{new RunningWindow{Handle=handle,ProcessId=(uint)front.Id,Path=Path.Combine(b,"ProcessFixture.exe")}}).Ended==0,"mismatched executable path rejected");
+   Check(ApplicationTasks.EndApplication(new[]{new RunningWindow{Handle=handle,ProcessId=0,Path=target.Path}}).Ended==0,"stale process id rejected");
+   var result=await Task.Run(()=>ApplicationTasks.EndApplication(new[]{target}));
+   Check(result.Ended==2,"foreground and same-path background processes ended");
+   Check(front.WaitForExit(3000) && processes[1].WaitForExit(3000),"both target instances exited");
+   Check(!processes[2].HasExited,"same filename at different path preserved");
+  } finally {foreach(var p in processes){try{if(!p.HasExited)p.Kill();}catch{}p.Dispose();}}
+ }
  static IEnumerable<DependencyObject> Descendants(DependencyObject parent) {
   for(int i=0;i<System.Windows.Media.VisualTreeHelper.GetChildrenCount(parent);i++){
    var child=System.Windows.Media.VisualTreeHelper.GetChild(parent,i); yield return child;
@@ -394,3 +492,7 @@ class Program
   }
  }
 }
+
+
+
+

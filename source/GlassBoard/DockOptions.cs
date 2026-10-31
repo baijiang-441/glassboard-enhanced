@@ -8,6 +8,7 @@ namespace GlassBoard;
 [DataContract]
 public class DockOptions
 {
+    [DataMember] public double Length = 900;
 	[DataMember]
 	public double IconSize = 44.0;
 
@@ -93,7 +94,7 @@ public class DockOptions
 	public MaterialOptions Material = new MaterialOptions();
 
 	[DataMember]
-	public double HideDelay = 900.0;
+	public double HideDelay = 250.0;
 
 	[DataMember]
 	public double EdgeRange = 12.0;
@@ -107,6 +108,7 @@ public class DockOptions
 	[OnDeserializing]
 	private void Defaults(StreamingContext context)
 	{
+        Length = 900;
 		IconSize = 44.0;
 		Spacing = 6.0;
 		Padding = 16.0;
@@ -132,7 +134,7 @@ public class DockOptions
 		SpringReveal = true;
 		ShowShortcutOverlays = false;
 		SharperIcons = false;
-		HideDelay = 900.0;
+		HideDelay = 250.0;
 		EdgeRange = 12.0;
 		BlurRadius = 18.0;
 		EdgeStrength = 1.0;
@@ -149,6 +151,7 @@ public class DockOptions
 
 	public void Normalize()
 	{
+        Length = LayoutRules.Clamp(Length, 480, 2000, 900);
 		ItemOrder = (ItemOrder ?? new List<string>()).Where((string x) => !string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.OrdinalIgnoreCase).Take(30)
 			.ToList();
 		RunningOrder = (RunningOrder ?? new List<string>()).Where((string x) => !string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.OrdinalIgnoreCase).Take(200)
@@ -166,7 +169,7 @@ public class DockOptions
 		Zoom = LayoutRules.Clamp(Zoom, 1.0, 1.6, 1.2);
 		Offset = LayoutRules.Clamp(Offset, -500.0, 500.0, 0.0);
 		MotionLevel = LayoutRules.Clamp(MotionLevel, 0.5, 1.5, 1.0);
-		HideDelay = LayoutRules.Clamp(HideDelay, 200.0, 3000.0, 900.0);
+		HideDelay = LayoutRules.Clamp(HideDelay, 200.0, 3000.0, 250.0);
 		EdgeRange = LayoutRules.Clamp(EdgeRange, 3.0, 48.0, 12.0);
 		BlurRadius = LayoutRules.Clamp(BlurRadius, 0.0, 40.0, 18.0);
 		EdgeStrength = LayoutRules.Clamp(EdgeStrength, 0.2, 2.0, 1.0);

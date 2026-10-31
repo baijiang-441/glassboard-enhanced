@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
@@ -105,7 +105,7 @@ public static class RunningWindows
 	[DllImport("user32.dll", EntryPoint = "GetClassLongW")]
 	private static extern uint ClassIcon32(IntPtr window, int index);
 
-	public static ImageSource Icon(RunningWindow window)
+	public static ImageSource Icon(RunningWindow window, bool highResolution = false)
 	{
 		try
 		{
@@ -122,11 +122,15 @@ public static class RunningWindows
 			{
 				BitmapSource bitmapSource = Imaging.CreateBitmapSourceFromHIcon(result, Int32Rect.Empty, BitmapSizeOptions.FromEmptyOptions());
 				bitmapSource.Freeze();
+                if(highResolution && bitmapSource.PixelWidth<96 && !string.IsNullOrEmpty(window.Path)) {
+                    var large=Native.Icon(window.Path,false,true) as BitmapSource;
+                    if(large!=null && large.PixelWidth>bitmapSource.PixelWidth)return large;
+                }
 				return bitmapSource;
 			}
 			if (!string.IsNullOrEmpty(window.Path))
 			{
-				ImageSource imageSource = Native.Icon(window.Path);
+				ImageSource imageSource = Native.Icon(window.Path,false,highResolution);
 				if (imageSource != null)
 				{
 					return imageSource;
@@ -305,6 +309,35 @@ public static class RunningWindows
 	{
 		return For(entry).Count > 0;
 	}
+
+    [DllImport("user32.dll")] private static extern IntPtr GetAncestor(IntPtr window, uint flags);
+
+    public static IntPtr ExternalForeground()
+    {
+        IntPtr window = GetForegroundWindow();
+        GetWindowThreadProcessId(window, out uint process);
+        return process != 0 && process != (uint)Process.GetCurrentProcess().Id ? window : IntPtr.Zero;
+    }
+
+    public static bool MinimizeForeground(IEnumerable<IntPtr> handles, IntPtr beforeDockActivation = default(IntPtr))
+    {
+        IntPtr foreground = GetForegroundWindow();
+        GetWindowThreadProcessId(foreground, out uint process);
+        // WPF mouse capture / UI Automation can activate the Dock before Click is delivered.
+        // Only substitute when our own window took focus, never when another app is foreground.
+        if ((foreground == IntPtr.Zero || process == (uint)Process.GetCurrentProcess().Id) && beforeDockActivation != IntPtr.Zero)
+            foreground = beforeDockActivation;
+        if (foreground == IntPtr.Zero) return false;
+        IntPtr owner = GetAncestor(foreground, 3);
+        foreach (IntPtr handle in handles)
+            if (IsWindow(handle) && !IsIconic(handle) && (handle == foreground || GetAncestor(handle, 3) == owner))
+            {
+                bool sent = ShowWindowAsync(handle, 6);
+                Store.Trace("DOCK minimize handle=" + handle + " previousForeground=" + foreground + " sent=" + sent);
+                return sent;
+            }
+        return false;
+    }
 
 	public static bool ActivateHandle(IntPtr handle)
 	{

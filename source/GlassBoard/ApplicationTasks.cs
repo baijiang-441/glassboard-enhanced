@@ -69,6 +69,63 @@ public static class ApplicationTasks
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
     [DllImport("user32.dll")] private static extern bool PostMessage(IntPtr window, uint message, IntPtr w, IntPtr l);
 
+    public sealed class EndProcessResult
+    {
+        public int Matched, Ended, Failed;
+    }
+
+    [DllImport("kernel32.dll", SetLastError=true)]
+    private static extern Microsoft.Win32.SafeHandles.SafeProcessHandle OpenProcess(uint access, bool inherit, uint process);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    private static extern bool QueryFullProcessImageName(Microsoft.Win32.SafeHandles.SafeProcessHandle process, uint flags, StringBuilder path, ref int size);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    private static extern bool TerminateProcess(Microsoft.Win32.SafeHandles.SafeProcessHandle process, uint code);
+
+    private static string ImagePath(Microsoft.Win32.SafeHandles.SafeProcessHandle handle)
+    {
+        var path = new StringBuilder(32768); int length = path.Capacity;
+        return QueryFullProcessImageName(handle, 0, path, ref length) ? path.ToString() : null;
+    }
+
+    // Called only after explicit confirmation. Match the full executable path, never just a process name.
+    // Keep the validated native handle through termination so a recycled PID cannot select another process.
+    public static EndProcessResult EndApplication(IEnumerable<RunningWindow> windows)
+    {
+        var result = new EndProcessResult();
+        var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        int ownId, session;
+        using (var own = Process.GetCurrentProcess()) { ownId = own.Id; session = own.SessionId; }
+        foreach (var window in windows ?? Enumerable.Empty<RunningWindow>())
+        {
+            if (window == null || window.ProcessId == 0 || window.ProcessId == ownId || string.IsNullOrWhiteSpace(window.Path)) continue;
+            GetWindowThreadProcessId(window.Handle, out uint owner);
+            if (owner != window.ProcessId) continue;
+            using (var handle = OpenProcess(0x1000, false, owner))
+                if (!handle.IsInvalid && string.Equals(ImagePath(handle), window.Path, StringComparison.OrdinalIgnoreCase)) paths.Add(window.Path);
+        }
+        if (paths.Count == 0) return result;
+        foreach (var process in Process.GetProcesses())
+        {
+            using (process)
+            {
+                try
+                {
+                    if (process.Id == ownId || process.SessionId != session) continue;
+                    using (var handle = OpenProcess(0x1001, false, (uint)process.Id))
+                    {
+                        if (handle.IsInvalid || !paths.Contains(ImagePath(handle) ?? "")) continue;
+                        result.Matched++;
+                        if (TerminateProcess(handle, 1)) result.Ended++;
+                        else result.Failed++;
+                    }
+                }
+                catch (InvalidOperationException) { } // exited during enumeration
+                catch (System.ComponentModel.Win32Exception) { }
+            }
+        }
+        return result;
+    }
+
     public static bool CloseWindow(RunningWindow window)
     {
         if (window == null || !IsWindow(window.Handle)) return false;

@@ -1614,6 +1614,11 @@ public class Controller
 		desktopSyncTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(10) };
 		desktopSyncTimer.Tick += async delegate { await SyncDesktopAsync(); };
 		desktopSyncTimer.Start();
+		System.Windows.Threading.Dispatcher.CurrentDispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, new Action(() =>
+		{
+			try { if (!ShuttingDown && !Board.IsVisible) Board.PrepareHiddenView(); }
+			catch (Exception ex) { Store.Log(ex); }
+		}));
 	}
 
 	private static string[] DesktopRoots() => new[] {
@@ -2758,6 +2763,7 @@ public class Controller
 				draft.Spacing = value;
 				live();
 			});
+            func2(stackPanel3, "Dock 长度（运行图标过多时重叠）", 480, 2000, draft.Length, 20, " px", delegate(double value) { draft.Length = value; live(); });
 			Slider padding = func2(stackPanel3, "玻璃板内边距", 8.0, 28.0, draft.Padding, 1.0, " px", delegate(double value)
 			{
 				draft.Padding = value;

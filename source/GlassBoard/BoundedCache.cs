@@ -18,7 +18,8 @@ public sealed class BoundedCache<TKey, TValue>
 
 	private readonly int capacity;
 
-	public int Count => lookup.Count;
+	private readonly object sync = new object();
+    public int Count { get { lock(sync) return lookup.Count; } }
 
 	public BoundedCache(int limit, IEqualityComparer<TKey> comparer = null)
 	{
@@ -28,6 +29,8 @@ public sealed class BoundedCache<TKey, TValue>
 
 	public bool TryGet(TKey key, out TValue value)
 	{
+        lock (sync)
+        {
 		if (!lookup.TryGetValue(key, out var value2))
 		{
 			value = default(TValue);
@@ -37,10 +40,14 @@ public sealed class BoundedCache<TKey, TValue>
 		recent.AddFirst(value2);
 		value = value2.Value.Value;
 		return true;
-	}
+
+        }
+    }
 
 	public void Put(TKey key, TValue value)
 	{
+        lock (sync)
+        {
 		if (lookup.TryGetValue(key, out var value2))
 		{
 			value2.Value.Value = value;
@@ -60,11 +67,17 @@ public sealed class BoundedCache<TKey, TValue>
 			recent.RemoveLast();
 			lookup.Remove(last.Value.Key);
 		}
-	}
+
+        }
+    }
 
 	public void Clear()
 	{
+        lock (sync)
+        {
 		lookup.Clear();
 		recent.Clear();
-	}
+
+        }
+    }
 }

@@ -19,6 +19,19 @@ public static class DesktopWindowPolicy
 
 	[DllImport("user32.dll", SetLastError = true)]
 	private static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int width, int height, uint flags);
+	[StructLayout(LayoutKind.Sequential)] private struct Point { public int X, Y; }
+	[DllImport("user32.dll")] private static extern IntPtr WindowFromPoint(Point point);
+	[DllImport("user32.dll")] private static extern IntPtr GetAncestor(IntPtr window, uint flags);
+	[DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
+	public static bool RestoreIfCovered(Window window, int x, int y)
+	{
+		IntPtr hit = GetAncestor(WindowFromPoint(new Point { X=x, Y=y }), 2);
+		GetWindowThreadProcessId(hit, out uint process);
+		// Leave our preview, context menu and dialogs above their owner.
+		if (hit == IntPtr.Zero || process == (uint)System.Diagnostics.Process.GetCurrentProcess().Id) return false;
+		RaiseWithoutActivation(window);
+		return true;
+	}
 
 	public static int ToolStyle(int style)
 	{

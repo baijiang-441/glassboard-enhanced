@@ -4,6 +4,11 @@ namespace GlassBoard;
 
 public class AutoHidePolicy
 {
+	public static bool AtRevealEdge(System.Windows.Point point, System.Windows.Rect screen, double dockLeft, double dockWidth, double edgeRange)
+	{
+		return point.X >= Math.Max(screen.Left, dockLeft) && point.X < Math.Min(screen.Right, dockLeft + dockWidth)
+			&& point.Y >= screen.Bottom - edgeRange && point.Y < screen.Bottom;
+	}
 	public bool Hidden;
 
 	private DateTime lastSeen = DateTime.MinValue;

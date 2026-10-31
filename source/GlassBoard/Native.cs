@@ -152,6 +152,12 @@ public static class Native
 			DestroyIcon(intPtr);
 		}
 	}
+	public static ImageSource CachedIcon(string path, bool overlays = false, bool sharper = false)
+	{
+		if (string.IsNullOrWhiteSpace(path)) return null;
+		icons.TryGet((sharper ? "sharp/" : "normal/") + (overlays ? "overlay/" : "plain/") + path, out var image);
+		return image;
+	}
 
 	public static void ClearIconCache()
 	{

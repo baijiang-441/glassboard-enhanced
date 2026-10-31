@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
@@ -130,10 +130,15 @@ public class BoardWindow : GlassWindow
 
 	private readonly DispatcherTimer idleRelease = new DispatcherTimer
 	{
-		Interval = TimeSpan.FromSeconds(2.0)
+		Interval = TimeSpan.FromMinutes(2.0)
 	};
 
 	private bool preparingView;
+	private string viewSignature;
+	private bool viewDirty = true;
+	private string PresentationSignature() => string.Join("|", C.Prefs.Light, C.Prefs.BoardHideSearch, C.Prefs.BoardHideGroups,
+		C.Prefs.BoardHideFolders, C.Prefs.BoardIconSize, C.Prefs.BoardIconGap, C.Prefs.Dock.ShowRunning,
+		C.Prefs.Dock.ShowShortcutOverlays, C.Prefs.Dock.SharperIcons, Width, Height);
 
 	private string pendingStatus;
 
@@ -210,6 +215,7 @@ public class BoardWindow : GlassWindow
 		};
 		base.PreviewMouseDown += delegate
 		{
+			PinHoverPreview();
 			if (!entryDragRunning && activeDrag)
 			{
 				EndDragPreview();
@@ -886,6 +892,8 @@ public class BoardWindow : GlassWindow
 		capacity = columns * num;
 		Build(num);
 		Search.Text = text;
+		viewSignature = PresentationSignature();
+		viewDirty = false;
 	}
 
 	public void RefreshIcons()
@@ -1044,8 +1052,30 @@ public class BoardWindow : GlassWindow
 		return true;
 	}
 
-	public void Open()
+	public bool IsHoverPreview { get; private set; }
+	public void Open() { IsHoverPreview = false; OpenCore(true); }
+	internal void OpenHoverPreview()
 	{
+		if (IsVisible) return;
+		IsHoverPreview = true;
+		OpenCore(true, false);
+	}
+	internal void PinHoverPreview()
+	{
+		if (!IsHoverPreview || !IsVisible) return;
+		IsHoverPreview = false;
+		ShowActivated = true;
+		Activate();
+		Native.SetForegroundWindow(new WindowInteropHelper(this).Handle);
+	}
+	internal void PrepareHiddenView()
+	{
+		if (!IsVisible) { OpenCore(false); idleRelease.Start(); }
+	}
+	private void OpenCore(bool show, bool activate = true)
+	{
+		var openTimer = System.Diagnostics.Stopwatch.StartNew();
+		long styled = 0, built = 0, backdrop = 0;
 		idleRelease.Stop();
 		EndDragPreview();
 		preparingView = true;
@@ -1067,10 +1097,11 @@ public class BoardWindow : GlassWindow
 			base.Width = Math.Max(Math.Min(860.0, workArea.Width - 32.0), base.Width);
 			base.Height = Math.Max(Math.Min(560.0, workArea.Height - 32.0), base.Height);
 			base.Left = FeatureRules.Position(placement.PanelLeft ?? (workArea.Left + (workArea.Width - base.Width) / 2.0), workArea.Left, workArea.Width, base.Width);
-			base.Top = FeatureRules.Position(placement.PanelTop ?? (workArea.Top + (workArea.Height - C.Dock.Height - base.Height) / 2.0), workArea.Top, workArea.Height, base.Height);
+			base.Top = FeatureRules.Position(placement.PanelTop ?? (C.Dock.RestingTop - base.Height - 8.0), workArea.Top, workArea.Height, base.Height);
 			Thumb thumb = moveGrip;
 			Visibility visibility2 = (resizeGrip.Visibility = (placement.PanelLocked ? Visibility.Collapsed : Visibility.Visible));
 			thumb.Visibility = visibility2;
+			bool hadSelection = editing || selected.Count > 0;
 			editing = false;
 			selected.Clear();
 			LightTheme = C.Prefs.Light;
@@ -1079,9 +1110,21 @@ public class BoardWindow : GlassWindow
 			ConfigureGlass(C.Prefs.Dock, C.Prefs.BoardMaterial);
 			GlassPercent = C.Prefs.OpacityPercent ?? 72.0;
 			Polish.Apply(this, LightTheme);
-			BuildForSize();
+			styled = openTimer.ElapsedMilliseconds;
+			if (layout == null || viewSignature != PresentationSignature()) BuildForSize();
+			else if (viewDirty || hadSelection) { SyncGroups(); Render(); viewDirty = false; }
+			built = openTimer.ElapsedMilliseconds;
 			Backdrop(C.Prefs.Light);
+			backdrop = openTimer.ElapsedMilliseconds;
+			if (!show) { Measure(new Size(Width, Height)); Arrange(new Rect(0,0,Width,Height)); UpdateLayout(); return; }
+			ShowActivated = activate;
 			Show();
+			if (!activate)
+			{
+				DesktopWindowPolicy.RaiseWithoutActivation(this);
+				AnimateOpen();
+				return;
+			}
 			Activate();
 			Native.SetForegroundWindow(new WindowInteropHelper(this).Handle);
 			AnimateOpen();
@@ -1097,8 +1140,10 @@ public class BoardWindow : GlassWindow
 		finally
 		{
 			preparingView = false;
+			LastOpenProfile = "style=" + styled + " build=" + (built-styled) + " backdrop=" + (backdrop-built) + " show=" + (openTimer.ElapsedMilliseconds-backdrop) + " total=" + openTimer.ElapsedMilliseconds;
 		}
 	}
+	public string LastOpenProfile { get; private set; }
 
 	private void Build(int rows)
 	{
@@ -1603,6 +1648,7 @@ public class BoardWindow : GlassWindow
 
 	public void Render(bool animate = false)
 	{
+		viewDirty = true;
 		if (groupHeading != null) groupHeading.Text = C.Prefs.BoardHideGroups ? "全部应用" : C.Prefs.GroupLabel(currentGroup);
 		if (Tiles == null || (!base.IsVisible && !preparingView))
 		{
@@ -1625,6 +1671,7 @@ public class BoardWindow : GlassWindow
 		{
 			Tiles.Children.Add(Tile(item, num2++, animate));
 		}
+		viewDirty = false;
 	}
 
 	private void BoardMouseWheel(object sender, MouseWheelEventArgs e)
@@ -1652,6 +1699,11 @@ public class BoardWindow : GlassWindow
 		Render(animate: true);
 	}
 
+    private async void LoadTileIcon(Image image, Entry entry, bool overlays, bool sharper)
+    {
+        var source = await BoardIconLoader.ReadAsync(entry, overlays, sharper);
+        if (source != null && !Dispatcher.HasShutdownStarted) image.Source = source;
+    }
 	private FrameworkElement Tile(Entry a, int index, bool animate)
 	{
 		bool isSelected = editing && selected.Contains(a.Path);
@@ -1678,29 +1730,14 @@ public class BoardWindow : GlassWindow
 			VerticalAlignment = VerticalAlignment.Center
 		};
 		grid.Children.Add(stackPanel);
-		ImageSource imageSource = FeatureUi.Icon(a, C.Prefs.Dock.ShowShortcutOverlays, C.Prefs.Dock.SharperIcons);
-		if (imageSource != null)
-		{
-			stackPanel.Children.Add(new Image
-			{
-				Source = imageSource,
-				Width = C.Prefs.BoardIconSize,
-				Height = C.Prefs.BoardIconSize,
-				Margin = new Thickness(0.0, 0.0, 0.0, 8.0)
-			});
-		}
-		else
-		{
-			stackPanel.Children.Add(new TextBlock
-			{
-				Text = "▣",
-				Foreground = base.TextBrush,
-				FontSize = C.Prefs.BoardIconSize * 0.84,
-				Height = C.Prefs.BoardIconSize,
-				HorizontalAlignment = HorizontalAlignment.Center,
-				Margin = new Thickness(0.0, 0.0, 0.0, 8.0)
-			});
-		}
+        var icon = new Image {
+            Source = string.IsNullOrWhiteSpace(a.IconPath) ? Native.CachedIcon(a.Path, C.Prefs.Dock.ShowShortcutOverlays, C.Prefs.Dock.SharperIcons) : null,
+            Width = C.Prefs.BoardIconSize, Height = C.Prefs.BoardIconSize,
+            Margin = new Thickness(0, 0, 0, 8), SnapsToDevicePixels = true
+        };
+        RenderOptions.SetBitmapScalingMode(icon, BitmapScalingMode.HighQuality);
+        stackPanel.Children.Add(icon);
+        LoadTileIcon(icon, a, C.Prefs.Dock.ShowShortcutOverlays, C.Prefs.Dock.SharperIcons);
 		stackPanel.Children.Add(new TextBlock
 		{
 			Text = a.Name,
@@ -2147,3 +2184,4 @@ public class BoardWindow : GlassWindow
 		}
 	}
 }
+

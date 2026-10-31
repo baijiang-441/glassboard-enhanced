@@ -83,7 +83,7 @@ public class DockWindow : GlassWindow
 
 	private Controller C;
 
-	private StackPanel Items = new StackPanel
+	private DockStripPanel Items = new DockStripPanel
 	{
 		Orientation = System.Windows.Controls.Orientation.Horizontal,
 		VerticalAlignment = VerticalAlignment.Center,
@@ -94,7 +94,7 @@ public class DockWindow : GlassWindow
 
 	private HotkeyManager hotkeys;
 
-	private DispatcherTimer autoTimer = new DispatcherTimer
+	private DispatcherTimer autoTimer = new DispatcherTimer(DispatcherPriority.Input)
 	{
 		Interval = TimeSpan.FromMilliseconds(50.0)
 	};
@@ -105,12 +105,84 @@ public class DockWindow : GlassWindow
 	};
 
 	private DateTime lastRunningScan = DateTime.MinValue;
+    private DateTime lastPageWarm=DateTime.MinValue;
 
 	private AutoHidePolicy hidePolicy = new AutoHidePolicy();
 
 	private bool renderedHidden;
 
 	private bool pointerAtRevealEdge;
+    private bool pointerOverDock;
+
+    private readonly DispatcherTimer appsHoverTimer = new DispatcherTimer(DispatcherPriority.Input)
+    {
+        Interval = TimeSpan.FromMilliseconds(250)
+    };
+    private System.Windows.Controls.Button appsHoverButton;
+    private readonly DispatcherTimer appsPreviewWatch = new DispatcherTimer(DispatcherPriority.Input)
+    {
+        Interval = TimeSpan.FromMilliseconds(50)
+    };
+    private DateTime appsPreviewLeave;
+
+    private void ClickAppsPanel()
+    {
+        CancelAppsHover();
+        if (C.Board.IsVisible && C.Board.IsHoverPreview) C.Board.PinHoverPreview();
+        else C.Toggle();
+    }
+
+    private void CancelAppsHover()
+    {
+        appsHoverTimer.Stop();
+    }
+
+    private void InitializeAppsHover()
+    {
+        appsHoverTimer.Tick += delegate
+        {
+            CancelAppsHover();
+            if (appsHoverButton == null || renderedHidden || dragging || DockInputBusy || externalDockDrag || C.UiBusy || C.GlassSuppressed || C.Board.IsVisible)
+                return;
+            if ((ContextMenu != null && ContextMenu.IsOpen) || (taskMenu != null && taskMenu.IsOpen) ||
+                Items.Children.OfType<System.Windows.Controls.Button>().Any(b => b.ContextMenu != null && b.ContextMenu.IsOpen))
+                return;
+            var cursor = System.Windows.Forms.Cursor.Position;
+            var point = appsHoverButton.PointFromScreen(new System.Windows.Point(cursor.X, cursor.Y));
+            if (point.X < 0 || point.Y < 0 || point.X >= appsHoverButton.ActualWidth || point.Y >= appsHoverButton.ActualHeight)
+                return;
+            C.Board.OpenHoverPreview();
+            appsPreviewLeave = DateTime.MinValue;
+            appsPreviewWatch.Start();
+        };
+        appsPreviewWatch.Tick += delegate
+        {
+            if (!C.Board.IsVisible || !C.Board.IsHoverPreview) { appsPreviewWatch.Stop(); return; }
+            if (PointerOver(C.Board) || (appsHoverButton != null && PointerOver(appsHoverButton)) || C.UiBusy)
+            {
+                appsPreviewLeave = DateTime.MinValue;
+                return;
+            }
+            if (appsPreviewLeave == DateTime.MinValue) appsPreviewLeave = DateTime.UtcNow;
+            if (DateTime.UtcNow - appsPreviewLeave < TimeSpan.FromMilliseconds(250)) return;
+            appsPreviewWatch.Stop();
+            C.Board.CollapseSmooth();
+        };
+        Closed += delegate { CancelAppsHover(); appsPreviewWatch.Stop(); };
+    }
+
+    private void BindAppsHover(System.Windows.Controls.Button button)
+    {
+        CancelAppsHover();
+        appsHoverButton = button;
+        button.MouseEnter += delegate
+        {
+            if (!C.Board.IsVisible && !DockInputBusy && !dragging)
+                appsHoverTimer.Start();
+        };
+        button.MouseLeave += delegate { CancelAppsHover(); };
+        button.AddHandler(Mouse.PreviewMouseDownEvent, (MouseButtonEventHandler)delegate { CancelAppsHover(); }, true);
+    }
 
 	private double shownTop;
 
@@ -166,7 +238,7 @@ public class DockWindow : GlassWindow
 	{
 		BindPointerItem(element, entry.Path, entry.Name, delegate
 		{
-			C.Launch(entry);
+			LaunchDockEntry(entry);
 		}, beforeDrag);
 	}
 
@@ -190,7 +262,7 @@ public class DockWindow : GlassWindow
 	{
 		return StartPointerItem(owner, entry.Path, entry.Name, delegate
 		{
-			C.Launch(entry);
+			LaunchDockEntry(entry);
 		}, point, beforeDrag);
 	}
 
@@ -280,6 +352,7 @@ public class DockWindow : GlassWindow
 			Store.Trace("DOCK pointer release dragged=" + dockPointerResult.Dragged + " inside=" + flag + " candidate=" + (dockPointerResult.Target != null) + " changed=" + flag2);
 			if (dockPointerResult.Click)
 			{
+                Store.Trace("DOCK click source=" + dockPointerGesture.Source + " previousExternal=" + lastExternalForeground);
 				action?.Invoke();
 			}
 		}
@@ -691,11 +764,12 @@ public class DockWindow : GlassWindow
 		List<System.Windows.Controls.Button> collection = list.Where((System.Windows.Controls.Button b) => ItemKey(b) == null).ToList();
 		int num = list2.FindLastIndex((System.Windows.Controls.Button b) => !DockLayoutRules.SystemItem(ItemKey(b)));
 		list2.InsertRange((num < 0) ? Math.Min(2, list2.Count) : (num + 1), collection);
+        CloseTaskPreview();
 		Items.Children.Clear();
 		foreach (System.Windows.Controls.Button item in list2)
 		{
 			Items.Children.Add(item);
-			if (C.Prefs.Dock.ShowSeparator && ItemKey(item) == "glassboard://dock/apps")
+			if (C.Prefs.Dock.ShowSeparator && !taskWheel.Running && ItemKey(item) == "glassboard://dock/apps")
 			{
 				Items.Children.Add(new Border
 				{
@@ -993,7 +1067,7 @@ public class DockWindow : GlassWindow
 			BeginAnimation(Window.TopProperty, doubleAnimationUsingKeyFrames, HandoffBehavior.SnapshotAndReplace);
 			return;
 		}
-		DoubleAnimation doubleAnimation = new DoubleAnimation(top, target, TimeSpan.FromMilliseconds(hide ? 160 : 190))
+		DoubleAnimation doubleAnimation = new DoubleAnimation(top, target, TimeSpan.FromMilliseconds(hide ? 120 : 190))
 		{
 			EasingFunction = new CubicEase
 			{
@@ -1203,8 +1277,9 @@ public class DockWindow : GlassWindow
 	}
 
 	private void RefreshTaskSnapshot()
-	{
-		if (taskWheel.Running && !DockInputBusy && !externalDockDrag && !dragging && !C.Board.ModalBusy && (taskMenu == null || !taskMenu.IsOpen) && (base.ContextMenu == null || !base.ContextMenu.IsOpen) && !Items.Children.OfType<System.Windows.Controls.Button>().Any((System.Windows.Controls.Button b) => b.IsMouseOver || (b.ContextMenu != null && b.ContextMenu.IsOpen)) && !(taskSignature == TaskSignature()))
+    {
+        if(DateTime.UtcNow-lastPageWarm>TimeSpan.FromSeconds(12)) {lastPageWarm=DateTime.UtcNow;ApplicationPageChoices.Warm(RunningWindows.Snapshot());}
+		if (taskPreview == null && taskWheel.Running && !DockInputBusy && !externalDockDrag && !dragging && !C.Board.ModalBusy && (taskMenu == null || !taskMenu.IsOpen) && (base.ContextMenu == null || !base.ContextMenu.IsOpen) && !Items.Children.OfType<System.Windows.Controls.Button>().Any((System.Windows.Controls.Button b) => b.IsMouseOver || (b.ContextMenu != null && b.ContextMenu.IsOpen)) && !(taskSignature == TaskSignature()))
 		{
 			ReadTaskGroups();
 			Refresh(capture: false);
@@ -1215,10 +1290,10 @@ public class DockWindow : GlassWindow
 	{
 		List<string> taskOrder = DockLayoutRules.Running(C.Prefs, TaskKeys);
 		List<TaskGroup> list = taskGroups.OrderBy((TaskGroup g) => taskOrder.IndexOf("running:" + g.Key)).ToList();
-		foreach (TaskGroup item in list.Take(shown))
+		foreach (TaskGroup item in list)
 		{
 			TaskGroup selected = item;
-			System.Windows.Controls.Button button = DockButton(null, RunningWindows.Icon(item.Windows[0]), delegate
+			System.Windows.Controls.Button button = DockButton(null, RunningWindows.Icon(item.Windows[0],true), delegate
 			{
 				OpenTask(selected, null);
 			}, item.Name + ((item.Windows.Count > 1) ? (" · " + item.Windows.Count + " 个窗口") : ""));
@@ -1241,32 +1316,9 @@ public class DockWindow : GlassWindow
 				});
 			}
 			button.ContextMenu = TaskWindowMenu(item);
+            DockStripPanel.SetIsApplication(button,true);
+            BindTaskPreview(button,item);
 			Items.Children.Add(button);
-		}
-		if (taskGroups.Count > shown && slots > 0)
-		{
-			System.Windows.Controls.Button more = DockButton("···", null, delegate
-			{
-			}, "更多正在运行的软件");
-			System.Windows.Controls.ContextMenu menu = MenuTheme.Create(C.Prefs.Light);
-			foreach (TaskGroup item2 in list.Skip(shown))
-			{
-				System.Windows.Controls.MenuItem menuItem = new System.Windows.Controls.MenuItem
-				{
-					Header = item2.Name + ((item2.Windows.Count > 1) ? ("（" + item2.Windows.Count + "）") : "")
-				};
-				foreach (RunningWindow window in item2.Windows)
-				{
-					menuItem.Items.Add(TaskWindowItem(window));
-				}
-				menu.Items.Add(menuItem);
-			}
-			more.Click += delegate
-			{
-				OpenTaskMenu(menu, more);
-			};
-			more.ContextMenu = menu;
-			Items.Children.Add(more);
 		}
 		if (taskGroups.Count == 0)
 		{
@@ -1310,6 +1362,27 @@ public class DockWindow : GlassWindow
             ShowTaskHint(sent > 0 ? "已请求关闭，未保存内容由应用提示" : "窗口已关闭或无权关闭");
         };
         menu.Items.Add(close);
+        var endProcess = new System.Windows.Controls.MenuItem { Header = "结束后台进程…" };
+        endProcess.Click += async delegate
+        {
+            bool previousBusy = C.Board.ModalBusy;
+            C.Board.ModalBusy = true;
+            try
+            {
+                string message = "强制结束“" + group.Name + "”的前台和后台进程？\n\n" +
+                    "这会关闭当前会话中使用同一程序文件的所有实例，未保存的内容可能丢失。";
+                if (System.Windows.MessageBox.Show(this, message, "结束后台进程", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No) != MessageBoxResult.Yes) return;
+                var targets = group.Windows.ToArray();
+                var result = await System.Threading.Tasks.Task.Run(() => ApplicationTasks.EndApplication(targets));
+                ShowTaskHint(result.Ended > 0 ? "已结束 " + result.Ended + " 个进程" + (result.Failed > 0 ? "；部分进程无权结束" : "") : "进程已退出、目标已变化或无权结束");
+                RunningWindows.Scan();
+                RefreshTaskSnapshot();
+                UpdateRunning();
+            }
+            catch (Exception ex) { ShowTaskHint(ex.Message); }
+            finally { C.Board.ModalBusy = previousBusy; }
+        };
+        menu.Items.Add(endProcess);
         menu.Items.Add(new Separator());
         menu.Items.Add(TaskManagerItem());
         AddDockControls(menu);
@@ -1335,8 +1408,90 @@ public class DockWindow : GlassWindow
         return menu;
     }
 
+
+    private DockPreviewWindow taskPreview;
+    private System.Windows.Controls.Button previewButton;
+    private TaskGroup previewGroup;
+    private readonly DispatcherTimer previewTimer=new DispatcherTimer {Interval=TimeSpan.FromMilliseconds(220)};
+    private readonly DispatcherTimer previewCloseTimer=new DispatcherTimer {Interval=TimeSpan.FromMilliseconds(180)};
+    private bool PointerOver(FrameworkElement element) {
+        if(element==null || !element.IsVisible || PresentationSource.FromVisual(element)==null)return false;
+        var cursor=System.Windows.Forms.Cursor.Position;var point=element.PointFromScreen(new System.Windows.Point(cursor.X,cursor.Y));
+        return point.X>=0 && point.X<element.ActualWidth && point.Y>=0 && point.Y<element.ActualHeight;
+    }
+    private void CloseTaskPreview() {
+        previewTimer.Stop(); previewCloseTimer.Stop();
+        var old=taskPreview;taskPreview=null;if(old!=null)old.Close();
+    }
+    private void PositionTaskPreview() {
+        if(taskPreview==null || previewButton==null)return;
+        var p=previewButton.PointToScreen(new System.Windows.Point(previewButton.ActualWidth/2,0));
+        p=source.CompositionTarget.TransformFromDevice.Transform(p);
+        taskPreview.Left=Math.Max(dockWorkingArea.Left,Math.Min(dockWorkingArea.Right-taskPreview.ActualWidth,p.X-taskPreview.ActualWidth/2));
+        taskPreview.Top=Math.Max(dockWorkingArea.Top,shownTop-taskPreview.ActualHeight-6);
+    }
+    private void InitializeTaskPreviews() {
+        previewTimer.Tick+=delegate {
+            previewTimer.Stop();
+            if(previewButton==null || !PointerOver(previewButton) || renderedHidden || DockInputBusy || dragging || C.UiBusy || previewButton.ContextMenu.IsOpen)return;
+            taskPreview=new DockPreviewWindow(this,C.Prefs.Light);
+            taskPreview.MouseEnter+=delegate{previewCloseTimer.Stop();};
+            taskPreview.MouseLeave+=delegate{previewCloseTimer.Start();};
+            taskPreview.Chosen+=CloseTaskPreview;
+            taskPreview.PointerLeft+=delegate{previewCloseTimer.Start();};
+            taskPreview.SizeChanged+=delegate{PositionTaskPreview();};
+            taskPreview.Show();taskPreview.UpdateLayout();PositionTaskPreview();
+            taskPreview.Populate(previewGroup.Windows);
+        };
+        previewCloseTimer.Tick+=delegate {
+            if(taskPreview!=null && (taskPreview.ContainsPointer() || PointerOver(previewButton)))previewCloseTimer.Stop();
+            else CloseTaskPreview();
+        };
+        Closed+=delegate{CloseTaskPreview();};
+    }
+    private void BindTaskPreview(System.Windows.Controls.Button button,TaskGroup group) {
+        ToolTipService.SetIsEnabled(button,false);
+        button.MouseEnter+=delegate {
+            CloseTaskPreview();previewButton=button;previewGroup=group;
+            Items.FocusApplication(button);previewTimer.Start();
+        };
+        button.MouseLeave+=delegate{previewTimer.Stop();if(taskPreview!=null)previewCloseTimer.Start();};
+        button.AddHandler(Mouse.PreviewMouseDownEvent,(MouseButtonEventHandler)delegate{CloseTaskPreview();},true);
+    }
+
+    [StructLayout(LayoutKind.Sequential)] private struct NativeDockRect {public int Left,Top,Right,Bottom;}
+    [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr window,out NativeDockRect rect);
+    private IntPtr lastExternalForeground;
+    private bool holdAfterMinimize;
+    private readonly DispatcherTimer settleDockTimer=new DispatcherTimer{Interval=TimeSpan.FromMilliseconds(130)};
+    private System.Drawing.Point minimizePointer;
+    private DateTime lastOcclusionRepair;
+    private void KeepDockVisibleAfterMinimize()
+    {
+        settleDockTimer.Stop();settleDockTimer.Start();
+        holdAfterMinimize=true; minimizePointer=System.Windows.Forms.Cursor.Position;
+        hidePolicy.Update(DateTime.UtcNow, C.Prefs.Dock.AutoHide, true, false, false, C.Prefs.Dock.HideDelay);
+        if (renderedHidden) { renderedHidden = false; AnimateDockVisibility(false, shownTop); }
+        DesktopWindowPolicy.RaiseWithoutActivation(this);
+    }
+    private void RememberExternalForeground()
+    {
+        IntPtr window = RunningWindows.ExternalForeground();
+        if (window != IntPtr.Zero) lastExternalForeground = window;
+    }
+
+    private void LaunchDockEntry(Entry entry)
+    {
+        if (!entry.IsFolder) {
+            RunningWindows.Scan();
+            if (RunningWindows.MinimizeForeground(RunningWindows.For(entry).Select(w => w.Handle), lastExternalForeground)) { KeepDockVisibleAfterMinimize(); return; }
+        }
+        C.Launch(entry);
+    }
 	private void OpenTask(TaskGroup group, FrameworkElement owner)
 	{
+        Store.Trace("DOCK task click name=" + group.Name + " handles=" + string.Join(",",group.Windows.Select(w=>w.Handle.ToString())));
+        if (RunningWindows.MinimizeForeground(group.Windows.Select(w => w.Handle), lastExternalForeground)) { KeepDockVisibleAfterMinimize(); return; }
 		if (group.Windows.Count == 1)
 		{
 			ActivateTask(group.Windows[0].Handle);
@@ -1369,6 +1524,7 @@ public class DockWindow : GlassWindow
 		if (RunningWindows.ActivateHandle(handle))
 		{
 			C.Board.CollapseSmooth();
+            KeepDockVisibleAfterMinimize();
 			return;
 		}
 		RunningWindows.Scan();
@@ -1515,6 +1671,7 @@ public class DockWindow : GlassWindow
 		: base(29.0)
 	{
 		C = c;
+        UseLayoutRounding=true;SnapsToDevicePixels=true;
 		base.Title = "GlassBoard Dock";
 		base.Height = 112.0;
 		base.ShowActivated = false;
@@ -1523,6 +1680,14 @@ public class DockWindow : GlassWindow
 		InitDockPointer();
 		InitializeBackgroundMove();
 		InitTaskDock();
+        taskWheel.Set(true); RunningWindows.Scan(); ReadTaskGroups();
+        InitializeTaskPreviews();
+        settleDockTimer.Tick+=delegate {
+            settleDockTimer.Stop();
+            if(!renderedHidden && PointerOver(Items))DesktopWindowPolicy.RaiseWithoutActivation(this);
+        };
+        Closed+=delegate{settleDockTimer.Stop();};
+        ApplicationPageChoices.Warm(RunningWindows.Snapshot());
 		moveGrip = new Thumb
 		{
 			Width = 42.0,
@@ -1563,8 +1728,10 @@ public class DockWindow : GlassWindow
 		{
 			FinishDockMove();
 		};
+		InitializeAppsHover();
 		autoTimer.Tick += delegate
 		{
+            RememberExternalForeground();
 			UpdateAutoHide();
 		};
 		runningTimer.Tick += delegate
@@ -1733,6 +1900,10 @@ public class DockWindow : GlassWindow
 	{
 		switch (msg)
 		{
+        case 33: // WM_MOUSEACTIVATE: keep the current app foreground until the Dock action runs.
+            RememberExternalForeground();
+            handled = true;
+            return new IntPtr(3); // MA_NOACTIVATE
 		case 32815:
 			handled = true;
 			base.Dispatcher.BeginInvoke((Action)delegate
@@ -1804,16 +1975,19 @@ public class DockWindow : GlassWindow
 		moveGrip.Visibility = Visibility.Visible;
 		moveGrip.Cursor = (C.Prefs.Placement.DockLocked ? System.Windows.Input.Cursors.Arrow : System.Windows.Input.Cursors.SizeAll);
 		moveGrip.ToolTip = (C.Prefs.Placement.DockLocked ? "右键 Dock → 允许自由拖动 Dock" : "拖动把手或空白区域移动 Dock，松手保存");
+        CloseTaskPreview();
 		Items.Children.Clear();
 		Items.Margin = new Thickness(dock.HoverPadding(), 0.0, dock.HoverPadding(), 0.0);
 		Surface.CornerRadius = new CornerRadius(dock.Radius);
-		AddSystemButton("glassboard://dock/apps", DockButton("▦", null, delegate
+		var appsButton = DockButton("▦", null, delegate
 		{
-			C.Toggle();
-		}, "展开大号应用面板"), delegate
+			ClickAppsPanel();
+		}, "应用面板 · 悬停预览，点击固定");
+        AddSystemButton("glassboard://dock/apps", appsButton, delegate
 		{
-			C.Toggle();
+			ClickAppsPanel();
 		});
+        BindAppsHover(appsButton);
 		if (dock.ShowComputer)
 		{
 			AddSystemButton("glassboard://dock/computer", DockButton("computer", null, delegate
@@ -1842,7 +2016,7 @@ public class DockWindow : GlassWindow
 			{
 				System.Windows.Controls.Button button = DockButton(null, FeatureUi.Icon(a, C.Prefs.Dock.ShowShortcutOverlays, C.Prefs.Dock.SharperIcons), delegate
 				{
-					C.Launch(a);
+					LaunchDockEntry(a);
 				}, a.Name, a);
 				button.ContextMenu = C.Menu(a, "Dock");
 				C.AttachSystemFileMenu(button, a, "Dock");
@@ -1866,7 +2040,7 @@ public class DockWindow : GlassWindow
 					{
 						if (!DockDragSuppresses(item))
 						{
-							C.Launch(entry);
+							LaunchDockEntry(entry);
 						}
 					};
 					BindDockSource(item, entry, delegate
@@ -1907,7 +2081,10 @@ public class DockWindow : GlassWindow
         Action openTaskManager = delegate { try { ApplicationTasks.OpenTaskManager(); } catch (Exception ex) { ShowTaskHint(ex.Message); } };
         AddSystemButton(DockLayoutRules.TaskManager, DockButton(null, TaskManagerIcon.Create(), openTaskManager, "任务管理器"), openTaskManager);
 		ArrangeDockItems();
-		base.Width = Math.Min(rect.Width - 20.0, dock.WidthFor((num == 0) ? 1 : num2));
+		base.Width = Math.Min(rect.Width - 20.0, taskWheel.Running ? dock.Length : dock.WidthFor((num == 0) ? 1 : num2));
+        Items.Budget = taskWheel.Running ? Math.Max(100,base.Width-28-2*dock.HoverPadding()) : double.PositiveInfinity;
+        Items.AnimateMoves=dock.MotionEnabled;
+        Items.InvalidateMeasure();
 		double num4 = dock.IconSize + 16.0 + (double)(dock.ShowLabels ? 18 : 0);
 		double num5 = Math.Min(1.6, 1.0 + (dock.Zoom - 1.0) * MotionLevel);
 		base.Height = 28.0 + num4 + dock.Padding * 2.0 + Math.Max(0.0, num4 * (num5 - 1.0) * 0.65 + 5.0 * MotionLevel - dock.Padding) * 2.0;
@@ -1971,18 +2148,40 @@ public class DockWindow : GlassWindow
 			System.Windows.Point point = source.CompositionTarget.TransformFromDevice.Transform(new System.Windows.Point(position.X, position.Y));
 			double bottom = dockScreenArea.Bottom;
 			bool over = !renderedHidden && point.X >= base.Left && point.X <= base.Left + base.Width && point.Y >= shownTop && point.Y <= shownTop + base.Height;
-			bool edge = point.X >= dockScreenArea.Left && point.X < dockScreenArea.Right
-				&& point.Y >= bottom - C.Prefs.Dock.EdgeRange && point.Y < bottom;
+			if(!renderedHidden && GetWindowRect(source.Handle,out NativeDockRect actual))
+                over=position.X>=actual.Left && position.X<actual.Right && position.Y>=actual.Top && position.Y<actual.Bottom;
+            if(over && !pointerOverDock && taskPreview==null && !C.UiBusy) DesktopWindowPolicy.RaiseWithoutActivation(this);
+            pointerOverDock=over;
+            if (over && PointerOver(Items) && taskPreview == null && !C.UiBusy && DateTime.UtcNow-lastOcclusionRepair > TimeSpan.FromMilliseconds(250))
+            {
+                if (DesktopWindowPolicy.RestoreIfCovered(this, position.X, position.Y))
+                {
+                    lastOcclusionRepair = DateTime.UtcNow;
+                    Store.Trace("DOCK repaired external occlusion under pointer");
+                }
+            }
+            bool edge = AutoHidePolicy.AtRevealEdge(point, dockScreenArea, base.Left, base.Width, C.Prefs.Dock.EdgeRange);
 			if (edge && !pointerAtRevealEdge && C.Prefs.Dock.AutoHide && !C.UiBusy && !C.Board.IsVisible)
 			{
 				DesktopWindowPolicy.RaiseWithoutActivation(this);
 			}
 			pointerAtRevealEdge = edge;
 			bool flag = (base.ContextMenu != null && base.ContextMenu.IsOpen) || Items.Children.OfType<System.Windows.Controls.Button>().Any((System.Windows.Controls.Button b) => b.ContextMenu != null && b.ContextMenu.IsOpen);
-			bool flag2 = hidePolicy.Update(DateTime.UtcNow, C.Prefs.Dock.AutoHide, over, edge, dragging || DockInputBusy || externalDockDrag || (taskMenu != null && taskMenu.IsOpen) || flag || C.UiBusy || C.Board.IsVisible, C.Prefs.Dock.HideDelay);
+			if(holdAfterMinimize && !over && (Math.Abs(position.X-minimizePointer.X)>4 || Math.Abs(position.Y-minimizePointer.Y)>4))holdAfterMinimize=false;
+            if(taskPreview!=null && !taskPreview.ContainsPointer() && !PointerOver(previewButton) && !previewCloseTimer.IsEnabled)previewCloseTimer.Start();
+            bool previewOver = taskPreview != null && (taskPreview.ContainsPointer() || previewCloseTimer.IsEnabled);
+            bool flag2 = hidePolicy.Update(DateTime.UtcNow, C.Prefs.Dock.AutoHide, over || holdAfterMinimize || previewOver, edge, dragging || DockInputBusy || externalDockDrag || (taskMenu != null && taskMenu.IsOpen) || flag || C.UiBusy, C.Prefs.Dock.HideDelay);
 			if (flag2 != renderedHidden)
 			{
 				renderedHidden = flag2;
+                if (flag2)
+                {
+                    CancelAppsHover();
+                    ResetDockHover();
+
+                }
+				foreach (var button in Items.Children.OfType<System.Windows.Controls.Button>())
+                    ToolTipService.SetIsEnabled(button, !flag2 && !DockStripPanel.GetIsApplication(button));
 				double target = (flag2 ? (bottom - 20.0) : shownTop);
 				AnimateDockVisibility(flag2, target);
 			}
@@ -2179,7 +2378,13 @@ public class DockWindow : GlassWindow
 				Visibility = Visibility.Collapsed
 			});
 		}
-		button.Content = grid2;
+		button.UseLayoutRounding=true;button.SnapsToDevicePixels=true;
+        grid2.UseLayoutRounding=true;grid2.SnapsToDevicePixels=true;
+        if(element is System.Windows.Controls.Image image) {
+            image.UseLayoutRounding=true;image.SnapsToDevicePixels=true;
+            RenderOptions.SetBitmapScalingMode(image,BitmapScalingMode.HighQuality);
+        }
+        button.Content = grid2;
 		ScaleTransform scale = new ScaleTransform(1.0, 1.0);
 		TranslateTransform lift = new TranslateTransform();
 		TransformGroup transformGroup = new TransformGroup();
@@ -2196,6 +2401,12 @@ public class DockWindow : GlassWindow
 					EasingMode = EasingMode.EaseOut
 				};
 				double toValue = (hover ? Math.Min(1.6, 1.0 + (o.Zoom - 1.0) * MotionLevel) : 1.0);
+                if(hover) {
+                    double dpi=source?.CompositionTarget?.TransformToDevice.M11??1;
+                    if(icon is System.Windows.Media.Imaging.BitmapSource bitmap)
+                        toValue=Math.Min(toValue,Math.Max(1,Math.Min(bitmap.PixelWidth,bitmap.PixelHeight)/(iconSize*dpi)));
+                    toValue=Math.Max(1,Math.Round(iconSize*dpi*toValue)/(iconSize*dpi));
+                }
 				scale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(toValue, TimeSpan.FromMilliseconds(180.0))
 				{
 					EasingFunction = easingFunction
@@ -2212,6 +2423,7 @@ public class DockWindow : GlassWindow
 		};
 		button.MouseEnter += delegate
 		{
+            Items.FocusApplication(button);
 			if (!DockInputBusy)
 			{
 				animate(obj: true);
